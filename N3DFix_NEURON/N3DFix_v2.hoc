@@ -1,0 +1,809 @@
+/*
+* N3DFix - automatic removal of swelling artifacts in neuronal 2D/3D reconstructions
+* last update: Mar 2016
+* VERSION 2.0
+*
+* Authors: Eduardo Conde-Sousa <econdesousa@gmail.com>
+*          Paulo de Castro Aguiar <pauloaguiar@ineb.up.pt>
+* Date:    Mar 2016
+*
+* N3DFix v2.0 is described in the following publication (!UNDER REVIEW!)
+* Conde-Sousa E, Szucs P, Peng H, Aguiar P - Neuroinformatics, 2016
+*
+*    Disclaimer
+*    ----------
+*    This program is free software: you can redistribute it and/or modify
+*    it under the terms of the GNU General Public License as published by
+*    the Free Software Foundation, either version 3 of the License, or
+*    any later version.
+*
+*    This program is distributed in the hope that it will be useful,
+*    but WITHOUT ANY WARRANTY; without even the implied warranty of
+*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+*    GNU General Public License for more details.
+*
+*    You can view a copy of the GNU General Public License at
+*    <http://www.gnu.org/licenses/>.
+*/
+
+
+
+// Steps:
+// 1) Set up global parameters
+// 2) declaring objrefs 
+// 3) defining additional functions
+// 4)	N3DFix: Locate and eliminate bumps 
+// 5)	Calling
+// 6)	Parameter check
+// 7)	Display gui-menus
+// 8)	HELP
+
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// 1) Set up global parameters
+/////////////////////////////////////////////////////////////////////////////////////////
+
+
+bump_slope = 0.10 // Bump Slope: given the ith point, we set slope(i)=(DIAM(i)-DIAM(i-1))/(ARC(i)-ARC(i-1)) and 
+                  // mark the ith point as potential bump if abs(slope(i))>BUMP_SLOPE
+                  // *not a user-defined-parameter* 
+                  // UNITS:   none
+                  // RANGE:   [0 ; 1] 
+                  // DEFAULT: 0.10
+
+bump_rnorm = 0.25 // Bump Norm: it sets the normalized diameter trigger that marks all points with diameter significantly different from baseline.
+                  // UNITS:   none
+                  // RANGE:   ]0 ; inf[
+                  // DEFAULT: 0.25
+					
+rmin = 0.2        // Minimum Diameter: it refers to the minimum diameter that a fiber could present.
+                  // It is used to correct points with "zero" diameter.
+                  // UNITS:   microns
+                  // RANGE:   ]0 ; inf[
+                  // DEFAULT: 0.2
+
+				  
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// 2) declaring objrefs 
+/////////////////////////////////////////////////////////////////////////////////////////
+
+
+//strings
+strdef cwd, output_file, report_file
+//files
+objref savv
+// SectionRef()
+objref s1
+//Vectors and Matrices
+objref baseline,baseline_M, weights, temp_mad, tmp_arc, tmp_diam, ReportMatrix, ARC, DIAM, baseline
+
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// 3) defining additional functions
+/////////////////////////////////////////////////////////////////////////////////////////
+
+// 2.1 - define vectors ARC and DIAM 
+proc create_vector_data(){ local it localobj SECTION
+	SECTION = $o1 	//SectionRef	
+	ARC = new Vector() 
+	DIAM = new Vector() 
+	SECTION.sec for it=0,n3d()-1{ 
+		ARC.append(arc3d(it)) 
+		DIAM.append(diam3d(it))
+	}
+}
+
+
+
+// 2.2 - Calculate 2nd order polynomial fit curve after removing outliers
+obfunc Calculate_Baseline() { local Npoints, MIN_m, MAX_, a, b, c, w1, wx, wx2, wx3, wx4, wy, wyx, wyx2, tmpx, tmpy, den, x, y, w, outlier_cutoff, median_D, mad, s, d    localobj baseline, weights, r_mad, tmp_arc, tmp_diam, ran, tmp_diam_noise, baseline_M
+
+	ran = new Random()
+
+	tmp_arc  = $o1
+	tmp_diam = $o2
+	Npoints = tmp_arc.size()
+	baseline = new Vector(Npoints, 0.0)
+	baseline_M = new Matrix(2,Npoints)
+	weights  = new Vector(Npoints, 0.0)
+	r_mad = new Vector(Npoints, 0.0)
+	tmp_diam_noise = new Vector(Npoints, 0.0)
+
+
+	//REMOVE OUTLIERS USING MAD (Median Absolute Deviation)
+	outlier_cutoff = 3.0
+
+	median_D = tmp_diam.median()
+	for( i = 0; i < Npoints; i = i + 1) {
+		r_mad.x[i] = abs( tmp_diam.x[i] - median_D )
+	}
+	mad = r_mad.median()
+	//print "mad = ", mad
+
+	// use fitting weights to exclude the outliers
+	if( mad > 1.0e-6 ) {
+		//printf("w=\t")
+		for( i = 0; i < Npoints; i = i + 1 ) {
+			r_mad.x[i] = abs( tmp_diam.x[i] - median_D ) / mad
+			if( r_mad.x[i] > outlier_cutoff ) {
+				weights.x[i] = 0.0
+			} else {
+				weights.x[i] = 1.0
+			}
+			//printf("%f ", weights.x[i])
+		}
+	} else {
+		// will end up here if more than 50% of data points had the same value
+		// add 1% noise to tmp_diam profile and recalculate mad
+		tmp_diam_noise = tmp_diam.c
+		MIN_ = tmp_diam.min()
+		for (i=0; i < Npoints; i = i + 1 ) {
+			tmp_diam_noise.x[i] = tmp_diam.x[i] * 0.01 * MIN_ * ran.uniform(-1,1)
+		}
+		median_D = tmp_diam_noise.median()
+		for( i = 0; i < Npoints; i = i + 1) {
+			r_mad.x[i] = abs( tmp_diam_noise.x[i] - median_D )
+		}
+		mad = r_mad.median()		
+	
+		if( mad > 1.0e-6 ) {
+			//printf("w=\t")
+			for( i = 0; i < Npoints; i = i + 1 ) {
+				r_mad.x[i] = abs( tmp_diam_noise.x[i] - median_D ) / mad
+				if( r_mad.x[i] > outlier_cutoff ) {
+					weights.x[i] = 0.0
+				} else {
+					weights.x[i] = 1.0
+				}
+				//printf("%f ", weights.x[i])
+			}			
+		}else{
+			//this is tricky situation; try signalling outliers assuming Normal dist...
+			s = tmp_diam.stdev
+			median_D = tmp_diam.median()
+			for( i = 0; i < Npoints; i = i + 1 ) {		
+			//printf("w=\t")
+				if( abs( tmp_diam.x[i] - median_D ) > 2.0 * s ) {
+					weights.x[i] = 0.0
+				} else {
+					weights.x[i] = 1.0
+				}
+				//printf("%f\t", weights.x[i])
+			}
+		}
+	}
+		
+	
+	//PERFORM 2ND ORDER POLYNOMIAL FIT
+	if(tmp_diam.size()-weights.sum()>2){
+		w1 = 0
+		wx =0
+		wx2 =0
+		wx3 =0
+		wx4 =0
+		wy =0
+		wyx =0
+		tmpx =0
+		tmpy =0
+		wyx2 =0
+		for( i = 0; i < Npoints; i = i + 1 ) {
+			x = tmp_arc.x[i]
+			y = tmp_diam.x[i]
+			w = weights.x[i]
+
+			w1 += w
+			tmpx = w * x
+			wx += tmpx
+			tmpx *= x
+			wx2 += tmpx
+			tmpx *= x
+			wx3 += tmpx
+			tmpx *= x
+			wx4 += tmpx
+			tmpy = w * y
+			wy += tmpy
+			tmpy *= x
+			wyx += tmpy
+			tmpy *= x
+			wyx2 += tmpy
+		}
+
+		den = wx2 * wx2 * wx2 - 2.0 * wx3 * wx2 * wx + wx4 * wx * wx + wx3 * wx3 * w1 - wx4 * wx2 * w1
+		if( den == 0.0 ) {
+			a = 0.0
+			b = 0.0
+			c = 0.0
+		} else {
+			a = (wx * wx * wyx2 - wx2 * w1 * wyx2 - wx2 * wx * wyx + wx3 * w1 * wyx + wx2 * wx2 * wy - wx3 * wx * wy) / den
+			b = (-wx2 * wx * wyx2 + wx3 * w1 * wyx2 + wx2 * wx2 * wyx - wx4 * w1 * wyx - wx3 * wx2 * wy + wx4 * wx * wy) / den
+			c = (wx2 * wx2 * wyx2 - wx3 * wx * wyx2 - wx3 * wx2 * wyx + wx4 * wx * wyx + wx3 * wx3 * wy - wx4 * wx2 * wy) / den
+		}
+		//printf("\nEq := (%f)*x*x + (%f)*x + (%f)\n", a, b, c)
+
+		// FILL IN DATA
+		for( i = 0; i < Npoints; i = i + 1 ) {
+			x = tmp_arc.x[i]
+			d = a * x * x + b * x + c
+			if( d > 1.0e-6 ) {
+				baseline.x[i] = d
+			} else {
+				baseline.x[i] = 1.0e-6
+			}
+		}
+	}else{
+		median_D = tmp_diam.median()
+		for( i = 0; i < Npoints; i = i + 1 ) {
+			baseline.x[i] = median_D
+		}
+	}
+	// Do not allow the baseline to go bellow the minimal diameter, or above maximal diameter - truncate
+	MIN_ = tmp_diam.min()
+	MAX_ = tmp_diam.max()	
+	for( i = 0; i < Npoints; i = i + 1 ) {
+		if (baseline.x[i]<MIN_){
+			baseline.x[i] = MIN_
+		}
+		if (baseline.x[i]>MAX_){
+			baseline.x[i] = MAX_
+		}
+	}
+	for( i = 0; i < Npoints; i = i + 1 ) {
+		baseline_M.x[0][i] = baseline.x[i]
+		baseline_M.x[1][i] = weights.x[i]
+	}
+	return baseline_M
+}
+
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// 4)	N3DFix: Locate and eliminate bumps 
+/////////////////////////////////////////////////////////////////////////////////////////
+
+proc N3DFix_v2(){ local  bump_rnorm localobj SECTION, slope, rnorm, signal_cor, DIAM_new
+
+	SECTION = $o1 	//SectionRef
+	
+	bump_rnorm = $2 //normalized diameter change trigger - minimal diam change normalized to baseline [%]
+	rmin  = $3      //minimum diameter, in micrometers and larger than 1.0e-6, used to correct points with "zero" radius [um]
+
+
+	create_vector_data(SECTION)
+
+	if(is_data_to_save==1){
+
+		// Create a matrix per section.
+		// col#1 contains n3d(ii),
+		// col#2 contains logical info about changing in diam
+
+		objref ReportMatrix	
+		SECTION.sec{ ReportMatrix = new Matrix(n3d(),12)
+			for(ii=0;ii<ReportMatrix.nrow;ii=ii+1){
+				ReportMatrix.x[ii][0] = ii
+				ReportMatrix.x[ii][1] = arc3d(ii)
+				ReportMatrix.x[ii][2] = diam3d(ii)
+				ReportMatrix.x[ii][9] = x3d(ii)
+				ReportMatrix.x[ii][10] = y3d(ii)
+				ReportMatrix.x[ii][11] = z3d(ii)
+			}
+		}
+	}
+	DoNodes = 1
+	
+	SECTION.sec Npoints = n3d()
+	
+	//Correct points with "zero" diam (DIAM<rmin)
+	for (i=0;i<Npoints;i=i+1){
+		if(DIAM.x[i]<rmin){
+			DIAM.x[i]=rmin
+		}
+	}
+	
+	
+	
+	
+	// CALCULATE TRIGGERS
+	// Trigger 1: r, baseline radius
+	objref baseline, baseline_M
+	baseline = new Vector(ARC.size,0.0)
+	baseline_M = Calculate_Baseline(ARC.c,DIAM.c)
+	for(i=0;i<ARC.size();i=i+1){
+		baseline.x[i] = baseline_M.x[0][i]
+	}
+
+	
+	
+	if(is_data_to_save==1){
+		// Create a matrix per section.
+		//#col:	0		1			2					3					4 		5		6			7		8
+		// 		n3d(ii) arc3d(ii)	(old_)diam3d(ii)	(new_)diam3d(ii)	slope	rnorm	baseline	outlier	signal_cor
+		SECTION.sec{
+			for(ii=0;ii<ReportMatrix.nrow;ii=ii+1){
+				ReportMatrix.x[ii][6] = baseline.x(ii)
+			}
+		}
+	}
+	
+	
+	
+	// Trigger 2: delta_r / delta_x, slope
+	slope = new Vector()
+	
+	// Trigger 3: DIAM/ baseline, normalized diameter
+	rnorm = new Vector()
+
+	rnorm.append(0)
+	slope.append(0)
+	for(p=1; p< Npoints;p=p+1){
+		// rnorm
+		rnorm.append( DIAM.x[p] / baseline.x[p])
+		// slope
+		if( abs( ARC.x[p] - ARC.x[p-1] ) < 1.0e-6){
+			if( abs( DIAM.x[p] - DIAM.x[p-1] ) < 1.0e-6){
+				slope.append(0.0)
+				// ATENTION!!! equal points are not removed! slope is set to zero!
+			}else{
+				sign = ( DIAM.x[p] - DIAM.x[p-1] ) / abs( DIAM.x[p] - DIAM.x[p-1] )
+				slope.append( 2.0 * sign * bump_slope)
+				// ATENTION!!! same (x,y,z) but abrupt change in diam! give the slope trigger
+			}
+		}else{
+			// normal case
+			slope.append((DIAM.x[p] - DIAM.x[p-1] ) / ( ARC.x[p] - ARC.x[p-1] ))
+		}
+	}
+	
+	
+	
+	// Identify locations to correct
+	signal_cor = new Vector()
+	signal_cor.append(0)
+	for(p =1; p<Npoints ;p=p+1){
+		if( abs( slope.x[p] ) < bump_slope && abs( rnorm.x[p] - 1 ) < bump_rnorm ){
+			signal_cor.append(0)
+		}else{
+			signal_cor.append(1)
+		}
+	}
+	
+	if(is_data_to_save==1){
+		// Create a matrix per section.
+		//#col:	0		1			2					3					4 		5		6			7		8
+		// 		n3d(ii) arc3d(ii)	(old_)diam3d(ii)	(new_)diam3d(ii)	slope	rnorm	baseline	outlier	signal_cor
+		SECTION.sec{
+			for(ii=0;ii<ReportMatrix.nrow;ii=ii+1){
+				ReportMatrix.x[ii][4] = slope.x(ii)
+				ReportMatrix.x[ii][5] = rnorm.x(ii)
+				ReportMatrix.x[ii][7] = 1-baseline_M.x[1][ii]
+				ReportMatrix.x[ii][8] = signal_cor.x(ii)
+			}
+		}
+	}
+	
+	// Correct points using linear interpolation, whenever necessary
+	DIAM_new = DIAM.c
+	p = 1
+	while( p < Npoints){
+		// search for row of points to correct
+		if( signal_cor.x[p] == 1){
+			p1 = p - 1	// start point
+			p = p+1
+			while(p < Npoints){
+				if(signal_cor.x[p] == 1){
+					p = p+1
+				}else{
+					break
+				}
+			}
+			if( p<=Npoints - 1){
+				p2 = p
+			}else{
+				p2 = Npoints - 1
+			}
+			delta_x = ARC.x[p2]-ARC.x[p1]
+			if (abs(delta_x)>1.0e-6){
+				// this IS a bump; remove according with the locations of p1 and p2
+				
+				//choose r0 according to the location of p1
+				if(p1!=0){
+					// p1 is not a node
+					r0 = DIAM.x(p1)
+				}else{
+					// p1 is a node
+					if( SECTION.has_parent() && DoNodes == 1 ){
+						// p1 is a node and is not the 1st point in tree - go upstream and check diameter profiles in the father section
+						SECTION.parent r_father = diam3d(n3d()-1)
+						r0=r_father
+						if(r_father > baseline.x[p1]){// chose this option if it generates less steepness at edge
+							r0 = baseline.x[p1]
+						}
+					}else{// ~SECTION.has_parent() || DoNodes == 0
+						r0 = DIAM.x(p1)
+					}
+				}
+
+				//now choose m according to the location of p2
+				if(p2!=Npoints-1){
+					//p2 is not a node
+					m = (DIAM.x[p2]-r0) / delta_x
+				}else{
+					//p2 is a node
+					//force end diam to baseline level
+					m = (baseline.x[p2]-r0) / delta_x
+					if(m > bump_slope || abs(DIAM.x[p2]/baseline.x[p2] - 1) > bump_rnorm){
+						m = (DIAM.median()-r0) / delta_x
+					}
+				}
+				
+				//interpolate swelling artifact using linear interpolation: DIAM_new.x(i) = m*(ARC.x(i)-ARC.x(p1)) + r0
+				for (i=p1;i<=p2;i=i+1){
+				  DIAM_new.x(i) = m*(ARC.x(i)-ARC.x(p1)) + r0
+				}
+				
+			}else{//abs(delta_x)<=1.0e-6
+				for (i=p1;i<=p2;i=i+1){
+					DIAM_new.x(i) = baseline.x[i]
+				}
+			}
+	
+		}else{
+			p = p+1
+		}
+	}
+
+	if(is_data_to_save==1){
+		// Create a matrix per section.
+		//#col:	0		1			2					3					4 		5		6			7		8
+		// 		n3d(ii) arc3d(ii)	(old_)diam3d(ii)	(new_)diam3d(ii)	slope	rnorm	baseline	outlier	signal_cor
+		SECTION.sec{
+			for(ii=0;ii<ReportMatrix.nrow;ii=ii+1){
+				ReportMatrix.x[ii][3] = DIAM_new.x(ii)
+			}
+		}
+	}
+
+	for(ii=0;ii<Npoints;ii=ii+1){
+		pt3dchange(ii,DIAM_new.x[ii])
+	}
+	
+	if(is_data_to_save==1){
+
+		objref savv
+		savv = new File()
+		savv.aopen(report_file)
+		
+		SECTION.sec{
+			for(it = 0;it<n3d();it=it+1){
+				// even if p1 is changed, we have signal_cor.x[p1] = ReportMatrix.x[p1][8] = 0
+				if(abs(ReportMatrix.x[it][3]-ReportMatrix.x[it][2])<1e-6){
+					ReportMatrix.x[it][8]=0
+				}else{
+					ReportMatrix.x[it][8]=1
+				}
+				savv.printf("%s\t%d\t%g\t%g\t%g\t%g\t%g\t%g\t%g\t%g\n",secname(),ReportMatrix.x[it][0],ReportMatrix.x[it][1],ReportMatrix.x[it][2],ReportMatrix.x[it][3],ReportMatrix.x[it][4],ReportMatrix.x[it][5],ReportMatrix.x[it][6],ReportMatrix.x[it][7],ReportMatrix.x[it][8])
+			}
+		}
+		savv.close()
+	}
+
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// 5)	Calling
+/////////////////////////////////////////////////////////////////////////////////////////
+	
+// 5.1 - Just one section
+proc smooth_dend(){ localobj SECTION
+	
+	SECTION = $o1 	//SectionRef
+	N3DFix_v2(SECTION,bump_rnorm,rmin)
+	
+}
+
+// 5.2 - All neuron
+proc smooth_all(){
+
+	bump_rnorm = $1
+	rmin  = $2
+	printf("\n")
+	printf("****************************************\n")
+	printf("****************************************\n")
+	printf("\n\tParameters:\n")
+	printf("\n* Bump Normalized Diameter Change:\t\t%g\n", bump_rnorm)
+	printf("* Minimum Diameter:\t%g\n", rmin)
+	print " "
+	if(is_data_to_save == 1){
+		sprint(report_file,"%s%.3d_%.3d.txt","N3DFix_report_",bump_rnorm*100,rmin*100 )
+		cwd = getcwd()
+		sprint(cwd,"%s%s",cwd,report_file)
+		printf("****************************************\n")
+		printf("****************************************\n")
+		printf("\n\tReport saved at:\n\n")
+		printf("%s\n\n",cwd)
+		printf("****************************************\n")
+		printf("****************************************\n")
+		objref savv
+		savv = new File()
+		savv.wopen(report_file)
+		savv.printf("########################################\n")
+		savv.printf("########################################\n")
+		savv.printf("#                     N3DFix\n")
+		savv.printf("########################################\n")
+		savv.printf("########################################\n")
+		savv.printf("#\n")
+		savv.printf("# Eduardo Conde-Sousa <econdesousa@gmail.com>\n")
+		savv.printf("# and\n")
+		savv.printf("# Paulo Aguiar <pauloaguiar@ineb.up.pt>\n")
+		savv.printf("#\n")
+		savv.printf("# N3DFix v2.0 is described in the following manuscript (!UNDER REVIEW!)\n")
+		savv.printf("# Conde-Sousa E, Szucs P, Peng H, Aguiar P - Neuroinformatics, 2016\n")		
+		savv.printf("#\n")
+		savv.printf("#\n")
+		savv.printf("#Parameters:\n")
+		savv.printf("#\n")
+		savv.printf("# Bump Normalized Diameter Change:\n")
+		savv.printf("#               %d\n",bump_rnorm)
+		savv.printf("#\n")
+		savv.printf("# Minimum Diameter:\n")
+		savv.printf("#               %f\n",rmin)
+		savv.printf("#\n")
+		savv.printf("#\n")
+		savv.printf("#\n")
+		savv.printf("# REPORT:\n")
+		savv.printf("#Section\tn3d()[um]\tarc3d()[um]\told_diam[um]\tnew_diam[um]\tslope\trnorm\tbaseline[um]\toutlier_flag\tcorrection_flag\n")
+		savv.close()
+	}	
+	 
+	finitialize()
+	_sum = 0
+	forall for (x,0) _sum += area(x)
+	
+	finitialize()
+	forall{
+		objref DIAM, ARC, dydx, ppslope, pnslope, pzslope
+		objref s1
+		secname() s1 = new SectionRef()
+	
+		if (s1.has_parent && n3d()>2){
+			N3DFix_v2(s1,bump_rnorm,rmin)
+		}		
+	}
+	
+	finitialize()
+	sum_ = 0
+	forall for (x,0) sum_ += area(x)
+	
+	printf("\n\tArea Modifications Report:\n")
+	printf("\n* initial area:\t%.1f\n* final area:\t%.1f\n* removed area:\t%.1f\%\n\n",_sum, sum_,100*(_sum-sum_)/_sum)
+	printf("****************************************\n")
+	printf("****************************************\n")
+	printf("\nIf you use N3DFix in your work, please cite:\n")
+	printf("\n")
+	printf("Conde-Sousa E, Szucs P, Peng H, Aguiar P - Neuroinformatics, 2016 [UNDER REVIEW]\n\n")
+	printf("****************************************\n")
+	printf("****************************************\n")
+}
+	
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// 6)	Parameter check
+/////////////////////////////////////////////////////////////////////////////////////////
+
+/*proc test_thresh(){local fl
+fl = $1
+if(fl<0){
+	print "\n                        WARNING                        \nOnly positive slopes can be considered\n\nSlope threshold automatically changed to its absolute value\n"
+	bump_slope = - fl
+	}
+if(fl==0){
+	print "\n                        WARNING                        \nOnly positive slopes can be considered\n\nSlope bump_slopeold automatically changed to 0.10\n"
+	bump_slope = 0.1
+	}
+}*/
+proc test_rmin(){local fl
+fl = $1
+if(fl<0){
+	print "\n                        WARNING                        \nOnly positive diameters can be considered\n\nrmin automatically changed to its absolute value\n"
+	rmin = - fl
+	}
+if(fl==0){
+	print "\n                        WARNING                        \nOnly positive diameters can be considered\n\nrmin automatically changed to 0.2 microns\n"
+	rmim = 0.2
+	}
+}
+proc test_bump_rnorm(){local fl
+fl = $1
+if(fl<0){
+	print "\n                        WARNING                        \nOnly positive ratios can be considered\n\Ratio automatically changed to its absolute value\n"
+	bump_rnorm = - fl
+	}
+if(fl==0){
+	print "\n                        WARNING                        \nOnly positive ratios can be considered\n\Ratio automatically changed to 0.25\n"
+	bump_rnorm = 0.25
+	}
+}
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// 7)	Display gui-menus
+/////////////////////////////////////////////////////////////////////////////////////////
+
+proc close_windows(){local ii
+	PWManager[0].close(1)
+}	
+
+
+is_data_to_save = 1
+proc N3DFix_menu(){
+
+
+	
+	xpanel("N3DFix")
+//		xlabel("")
+//		xlabel(" Defining main parameters")	
+		xlabel("")	
+		xvalue("Minimum Diameter    ","rmin", 1,"test_rmin(rmin)", 0, 0)
+		xlabel("Minimum Diameter refers to the minimum diameter that a fiber could present.")//  
+		xlabel("(it is used to correct points with \"zero\" diameter [microns])")
+		xlabel("")
+		xvalue("Bump Normalized Diameter Change  ","bump_rnorm", 1,"test_bump_rnorm(bump_rnorm)", 0, 0)
+		xlabel("Bump Normalized Diameter Change sets the trigger for the (normalized) change in diameter.")
+		xlabel("(changes, normalized to the baseline profile, beyond this value are signalled as potential artifacts)")
+		xlabel("")	
+		xbutton("***************************** Remove artifacts from all sections *****************************","smooth_all(bump_rnorm,rmin)")
+		xlabel("")
+		xcheckbox("Save Data", &is_data_to_save)
+		xlabel("")
+		xbutton("help","N3DFix_help()")
+		xlabel("")
+		xlabel("")
+		
+
+
+		
+	xpanel(200,200)
+	
+
+		
+}	
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
+// 7)	HELP
+/////////////////////////////////////////////////////////////////////////////////////////
+
+// Disp help
+
+strdef hstr
+proc N3DFix_help(){
+
+	//close_windows()
+	sprint(hstr, "system(\"reset\")")
+	execute(hstr)
+
+	objref savv
+	savv = new File()
+	strdef output_file
+	output_file="N3DFix_help.txt"
+	cwd = getcwd()
+	sprint(cwd,"%s%s",cwd,output_file)
+	savv.wopen(output_file)
+	savv.printf("*  N3DFix - automatic removal of swelling artifacts in neuronal 2D/3D reconstructions\n")
+	savv.printf("*  last update: Mar 2016\n")
+	savv.printf("*  VERSION 2.0\n")
+	savv.printf("* \n")
+	savv.printf("*  Authors: Eduardo Conde-Sousa <econdesousa@gmail.com>\n")
+	savv.printf("*           Paulo de Castro Aguiar <pauloaguiar@ineb.up.pt>\n")
+	savv.printf("*  Date:    Mar 2016\n")
+	savv.printf("* \n")
+	savv.printf("*  N3DFix v2.0 is described in the following publication (!UNDER REVIEW!)\n")
+	savv.printf("*  Conde-Sousa E, Szucs P, Peng H, Aguiar P - Neuroinformatics, 2016\n")
+	savv.printf("* \n")
+	savv.printf("*     Disclaimer\n")
+	savv.printf("*     ----------\n")
+	savv.printf("*     This program is free software: you can redistribute it and/or modify\n")
+	savv.printf("*     it under the terms of the GNU General Public License as published by\n")
+	savv.printf("*     the Free Software Foundation, either version 3 of the License, or\n")
+	savv.printf("*     any later version.\n")
+	savv.printf("* \n")
+	savv.printf("*     This program is distributed in the hope that it will be useful,\n")
+	savv.printf("*     but WITHOUT ANY WARRANTY; without even the implied warranty of\n")
+	savv.printf("*     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n")
+	savv.printf("*     GNU General Public License for more details.\n")
+	savv.printf("* \n")
+	savv.printf("*     You can view a copy of the GNU General Public License at\n")
+	savv.printf("*     <http://www.gnu.org/licenses/>.\n")
+	savv.printf(" \n")
+	savv.printf(" \n")
+	savv.printf("****************************************\n")
+	savv.printf("****************************************\n")
+	savv.printf("***********  N3DFix help  **************\n")
+	savv.printf("****************************************\n")
+	savv.printf("****************************************\n")
+	savv.printf(" \n")
+	savv.printf(" \n")
+	savv.printf(" \n")
+	savv.printf("*********** Error Message?  ************\n")
+	savv.printf(" \n\n")
+	savv.printf("If the following message appears:\n")
+	savv.printf("Stack too deep. Increase with -NSTACK stacksize option\n")
+	savv.printf(" \n")
+	savv.printf("\n")
+	savv.printf(" * Under Linux OS:\n")
+	savv.printf(" \n")
+	savv.printf("    -> restart neuron with nstack options:\n")
+	savv.printf("       nrngui -NSTACK 100000 -NFRAME 2000 \"yourfile\".hoc\n")
+	savv.printf(" \n")
+	savv.printf("\n")
+	savv.printf(" * Under MSWindows OS:\n")
+	savv.printf(" \n")
+	savv.printf("    -> go to $NRN_HOME/lib/nrn.def and change NSTACK and NFRAME accordingly.\n")
+	savv.printf(" \n")
+	savv.printf(" \n")
+	savv.printf("You can also check on the neuron forum: http://www.neuron.yale.edu/phpbb/viewtopic.php?f=8&t=302\n")
+	savv.printf(" \n")
+	savv.printf(" \n")
+	savv.printf(" \n")
+	savv.printf(" \n")
+	savv.printf("*******  Parameter Specification  ******\n")	
+	savv.printf(" \n\n")
+	savv.printf("* Minimum Diameter:\n\n")
+	savv.printf("Minimum Diameter refers to the minimum diameter that a fiber could present.\n")
+	savv.printf("It is used to correct points with \"zero\" diameter.\n\n")
+	savv.printf("\tUNITS:   \tmicrons\n")
+	savv.printf("\tRANGE:   \t]0 ; inf[\n")
+	savv.printf("\tDEFAULT: \t0.2\n")
+	savv.printf("\n\n")
+	savv.printf("* Bump Normalized Diameter Change:\n\n")
+	savv.printf("Bump Normalized Diameter Change sets the normalized diameter trigger.\n")
+	savv.printf("Trigger that marks all points with diameter significantly different from baseline.\n\n")
+	savv.printf("\tUNITS:   \tnone\n")
+	savv.printf("\tRANGE:   \t]0 ; inf[\n")
+	savv.printf("\tDEFAULT: \t0.25\n")
+	savv.printf(" \n")
+	savv.printf(" \n")
+	savv.printf(" \n")
+	savv.printf(" \n")
+	savv.printf("****************  Other ****************\n")
+	savv.printf(" \n\n")
+	savv.printf(" -> If N3DFix menu is closed:\n")
+	savv.printf(" \n")
+	savv.printf("     * go to shell\n")
+	savv.printf(" \n")
+	savv.printf("     * type N3DFix_menu() and press ENTER\n")
+	savv.printf(" \n")
+	savv.printf(" \n")
+	savv.printf(" \n\n")
+	savv.printf(" -> To display help:\n")
+	savv.printf(" \n")
+	savv.printf("     * go to shell\n")
+	savv.printf(" \n")
+	savv.printf("     * type N3DFix_help() and press ENTER\n")
+	savv.printf(" \n\n")
+	savv.printf(" -> If you use N3DFix in your work:\n")
+	savv.printf(" \n")
+	savv.printf("     * please cite:\n")
+	savv.printf(" \n")
+	savv.printf("     * Conde-Sousa E, Szucs P, Peng H, Aguiar P - Neuroinformatics, 2016 (!UNDER REVIEW!)\n")
+
+	savv.close()
+		
+	sprint(hstr, "system(\"cat N3DFix_help.txt\")")
+	execute(hstr)
+	printf("\n\n")
+	printf("****************************************\n")
+	printf("****************************************\n")
+	printf("\tHelp file saved at:\n\n")
+	printf("%s\n\n",cwd)
+	printf("****************************************\n")
+	printf("****************************************\n")
+
+}
+
+N3DFix_menu()
+
+
+
